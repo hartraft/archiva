@@ -25,55 +25,64 @@ import org.apache.archiva.checksum.ChecksumAlgorithm;
 import org.apache.archiva.checksum.ChecksummedFile;
 import org.apache.archiva.common.utils.VersionComparator;
 import org.apache.archiva.common.utils.VersionUtil;
-import org.apache.archiva.maven2.metadata.MavenMetadataReader;
-import org.apache.archiva.maven2.model.Artifact;
-import org.apache.archiva.metadata.model.ArtifactMetadata;
-import org.apache.archiva.metadata.model.facets.AuditEvent;
-import org.apache.archiva.metadata.model.maven2.MavenArtifactFacet;
-import org.apache.archiva.metadata.repository.*;
-import org.apache.archiva.model.ArchivaRepositoryMetadata;
-import org.apache.archiva.model.ArtifactReference;
-import org.apache.archiva.model.VersionedReference;
-import org.apache.archiva.redback.authentication.AuthenticationResult;
-import org.apache.archiva.redback.authorization.AuthorizationException;
 import org.apache.archiva.components.cache.Cache;
 import org.apache.archiva.components.taskqueue.TaskQueueException;
+import org.apache.archiva.maven2.model.Artifact;
+import org.apache.archiva.metadata.audit.RepositoryListener;
+import org.apache.archiva.metadata.maven.model.MavenArtifactFacet;
+import org.apache.archiva.metadata.model.ArtifactMetadata;
+import org.apache.archiva.metadata.model.facets.AuditEvent;
+import org.apache.archiva.metadata.repository.MetadataRepository;
+import org.apache.archiva.metadata.repository.MetadataRepositoryException;
+import org.apache.archiva.metadata.repository.MetadataResolutionException;
+import org.apache.archiva.metadata.repository.MetadataSessionException;
+import org.apache.archiva.metadata.repository.RepositorySession;
+import org.apache.archiva.metadata.repository.RepositorySessionFactory;
+import org.apache.archiva.model.ArchivaRepositoryMetadata;
+import org.apache.archiva.redback.authentication.AuthenticationResult;
+import org.apache.archiva.redback.authorization.AuthorizationException;
 import org.apache.archiva.redback.system.DefaultSecuritySession;
 import org.apache.archiva.redback.system.SecuritySession;
 import org.apache.archiva.redback.system.SecuritySystem;
 import org.apache.archiva.redback.users.User;
 import org.apache.archiva.redback.users.UserManagerException;
 import org.apache.archiva.redback.users.UserNotFoundException;
-import org.apache.archiva.repository.ContentNotFoundException;
+import org.apache.archiva.repository.content.BaseRepositoryContentLayout;
+import org.apache.archiva.repository.content.ContentNotFoundException;
+import org.apache.archiva.repository.content.LayoutException;
 import org.apache.archiva.repository.ManagedRepository;
 import org.apache.archiva.repository.ManagedRepositoryContent;
 import org.apache.archiva.repository.RepositoryException;
 import org.apache.archiva.repository.RepositoryNotFoundException;
 import org.apache.archiva.repository.RepositoryRegistry;
-import org.apache.archiva.repository.storage.RepositoryStorage;
-import org.apache.archiva.repository.storage.StorageAsset;
-import org.apache.archiva.repository.storage.StorageUtil;
-import org.apache.archiva.metadata.audit.RepositoryListener;
-import org.apache.archiva.repository.metadata.base.MetadataTools;
+import org.apache.archiva.repository.RepositoryType;
+import org.apache.archiva.repository.content.ContentItem;
+import org.apache.archiva.repository.content.ItemNotFoundException;
+import org.apache.archiva.repository.content.ItemSelector;
+import org.apache.archiva.repository.content.Version;
+import org.apache.archiva.repository.content.base.ArchivaItemSelector;
 import org.apache.archiva.repository.metadata.RepositoryMetadataException;
+import org.apache.archiva.repository.metadata.base.MetadataTools;
 import org.apache.archiva.repository.metadata.base.RepositoryMetadataWriter;
 import org.apache.archiva.repository.scanner.RepositoryScanStatistics;
 import org.apache.archiva.repository.scanner.RepositoryScanner;
 import org.apache.archiva.repository.scanner.RepositoryScannerException;
 import org.apache.archiva.repository.scanner.RepositoryScannerInstance;
+import org.apache.archiva.repository.storage.RepositoryStorage;
+import org.apache.archiva.repository.storage.StorageAsset;
+import org.apache.archiva.repository.storage.fs.FsStorageUtil;
 import org.apache.archiva.rest.api.model.ArtifactTransferRequest;
 import org.apache.archiva.rest.api.model.StringList;
 import org.apache.archiva.rest.api.services.ArchivaRestServiceException;
 import org.apache.archiva.rest.api.services.RepositoriesService;
 import org.apache.archiva.scheduler.ArchivaTaskScheduler;
-import org.apache.archiva.scheduler.indexing.maven.ArchivaIndexingTaskExecutor;
 import org.apache.archiva.scheduler.indexing.ArtifactIndexingTask;
 import org.apache.archiva.scheduler.indexing.DownloadRemoteIndexException;
 import org.apache.archiva.scheduler.indexing.DownloadRemoteIndexScheduler;
+import org.apache.archiva.scheduler.indexing.maven.ArchivaIndexingTaskExecutor;
 import org.apache.archiva.scheduler.repository.model.RepositoryTask;
 import org.apache.archiva.security.ArchivaSecurityException;
 import org.apache.archiva.security.common.ArchivaRoleConstants;
-import org.apache.archiva.xml.XMLException;
 import org.apache.commons.io.FilenameUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
@@ -96,7 +105,6 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Date;
 import java.util.List;
-import java.util.Set;
 import java.util.TimeZone;
 
 /**
@@ -187,7 +195,7 @@ public class DefaultRepositoriesService
         }
     }
 
-    private ManagedRepositoryContent getManagedRepositoryContent(String id) throws RepositoryException
+    private ManagedRepositoryContent getManagedRepositoryContent( String id) throws RepositoryException
     {
         org.apache.archiva.repository.ManagedRepository repo = repositoryRegistry.getManagedRepository( id );
         if (repo==null) {
@@ -357,42 +365,39 @@ public class DefaultRepositoriesService
 
         // sounds good we can continue !
 
-        ArtifactReference artifactReference = new ArtifactReference();
-        artifactReference.setArtifactId( artifactTransferRequest.getArtifactId() );
-        artifactReference.setGroupId( artifactTransferRequest.getGroupId() );
-        artifactReference.setVersion( artifactTransferRequest.getVersion() );
-        artifactReference.setClassifier( artifactTransferRequest.getClassifier() );
         String packaging = StringUtils.trim( artifactTransferRequest.getPackaging() );
-        artifactReference.setType( StringUtils.isEmpty( packaging ) ? "jar" : packaging );
+        ItemSelector selector = ArchivaItemSelector.builder( )
+            .withProjectId( artifactTransferRequest.getArtifactId( ) )
+            .withArtifactId( artifactTransferRequest.getArtifactId( ) )
+            .withNamespace( artifactTransferRequest.getGroupId( ) )
+            .withArtifactVersion( artifactTransferRequest.getVersion( ) )
+            .withClassifier( artifactTransferRequest.getClassifier( ) )
+            .withExtension( StringUtils.isEmpty( packaging ) ? "jar" : packaging )
+            .build( );
+
 
         try
         {
 
             ManagedRepositoryContent sourceRepository =
                 getManagedRepositoryContent( artifactTransferRequest.getRepositoryId() );
+            BaseRepositoryContentLayout layout = sourceRepository.getLayout( BaseRepositoryContentLayout.class );
+            // String artifactSourcePath = sourceRepository.toPath( selector );
+            org.apache.archiva.repository.content.Artifact sourceArtifact = layout.getArtifact( selector );
 
-            String artifactSourcePath = sourceRepository.toPath( artifactReference );
-
-            if ( StringUtils.isEmpty( artifactSourcePath ) )
+            if ( !sourceArtifact.exists() )
             {
                 log.error( "cannot find artifact {}", artifactTransferRequest );
                 throw new ArchivaRestServiceException( "cannot find artifact " + artifactTransferRequest.toString(),
                                                        null );
             }
 
-            StorageAsset artifactFile = source.getAsset( artifactSourcePath );
-
-            if ( !artifactFile.exists() )
-            {
-                log.error( "cannot find artifact {}", artifactTransferRequest );
-                throw new ArchivaRestServiceException( "cannot find artifact " + artifactTransferRequest.toString(),
-                                                       null );
-            }
+            StorageAsset artifactFile = sourceArtifact.getAsset( );
 
             ManagedRepositoryContent targetRepository =
                 getManagedRepositoryContent( artifactTransferRequest.getTargetRepositoryId() );
 
-            String artifactPath = targetRepository.toPath( artifactReference );
+            String artifactPath = artifactFile.getPath( );
 
             int lastIndex = artifactPath.lastIndexOf( '/' );
 
@@ -404,7 +409,7 @@ public class DefaultRepositoriesService
             String timestamp = null;
 
             StorageAsset versionMetadataFile = target.getAsset(path + "/" + MetadataTools.MAVEN_METADATA );
-            /* unused */ getMetadata( versionMetadataFile );
+            /* unused */ getMetadata( targetRepository.getRepository().getType(), versionMetadataFile );
 
             if ( !targetDir.exists() )
             {
@@ -440,7 +445,7 @@ public class DefaultRepositoriesService
             pomFilename = FilenameUtils.removeExtension( pomFilename ) + ".pom";
 
             StorageAsset pomFile = source.getAsset(
-                artifactSourcePath.substring( 0, artifactPath.lastIndexOf( '/' ) )+"/"+ pomFilename );
+                artifactPath.substring( 0, artifactPath.lastIndexOf( '/' ) )+"/"+ pomFilename );
 
             if ( pomFile != null && pomFile.exists() )
             {
@@ -454,7 +459,7 @@ public class DefaultRepositoriesService
             // explicitly update only if metadata-updater consumer is not enabled!
             if ( !archivaAdministration.getKnownContentConsumers().contains( "metadata-updater" ) )
             {
-                updateProjectMetadata( target, targetDir, lastUpdatedTimestamp, timestamp, newBuildNumber,
+                updateProjectMetadata( target.getType(), target, targetDir, lastUpdatedTimestamp, timestamp, newBuildNumber,
                                        fixChecksums, artifactTransferRequest );
 
 
@@ -467,7 +472,7 @@ public class DefaultRepositoriesService
             log.debug("copyArtifact {}", msg);
 
         }
-        catch ( RepositoryException e )
+        catch ( RepositoryException | LayoutException e )
         {
             log.error( "RepositoryException: {}", e.getMessage(), e );
             throw new ArchivaRestServiceException( e.getMessage(), e );
@@ -505,20 +510,13 @@ public class DefaultRepositoriesService
         }
     }
 
-    private ArchivaRepositoryMetadata getMetadata( StorageAsset metadataFile )
+    private ArchivaRepositoryMetadata getMetadata( RepositoryType repositoryType, StorageAsset metadataFile )
         throws RepositoryMetadataException
     {
         ArchivaRepositoryMetadata metadata = new ArchivaRepositoryMetadata();
         if ( metadataFile.exists() )
         {
-            try
-            {
-                metadata = MavenMetadataReader.read( metadataFile.getFilePath() );
-            }
-            catch (XMLException e )
-            {
-                throw new RepositoryMetadataException( e.getMessage(), e );
-            }
+            metadata = repositoryRegistry.getMetadataReader( repositoryType ).read( metadataFile );
         }
         return metadata;
     }
@@ -536,7 +534,7 @@ public class DefaultRepositoriesService
         throws IOException
     {
 
-        StorageUtil.copyAsset( sourceFile, targetPath, true );
+        FsStorageUtil.copyAsset( sourceFile, targetPath, true );
         if ( fixChecksums )
         {
             fixChecksums( targetPath );
@@ -553,7 +551,7 @@ public class DefaultRepositoriesService
         }
     }
 
-    private void updateProjectMetadata( RepositoryStorage storage, StorageAsset targetPath, Date lastUpdatedTimestamp, String timestamp, int buildNumber,
+    private void updateProjectMetadata( RepositoryType repositoryType, RepositoryStorage storage, StorageAsset targetPath, Date lastUpdatedTimestamp, String timestamp, int buildNumber,
                                         boolean fixChecksums, ArtifactTransferRequest artifactTransferRequest )
         throws RepositoryMetadataException
     {
@@ -563,7 +561,7 @@ public class DefaultRepositoriesService
         StorageAsset projectDir = targetPath.getParent();
         StorageAsset projectMetadataFile = storage.getAsset( projectDir.getPath()+"/"+MetadataTools.MAVEN_METADATA );
 
-        ArchivaRepositoryMetadata projectMetadata = getMetadata( projectMetadataFile );
+        ArchivaRepositoryMetadata projectMetadata = getMetadata( repositoryType, projectMetadataFile );
 
         if ( projectMetadataFile.exists() )
         {
@@ -668,35 +666,19 @@ public class DefaultRepositoriesService
         try
         {
             ManagedRepositoryContent repository = getManagedRepositoryContent( repositoryId );
+            BaseRepositoryContentLayout layout = repository.getLayout( BaseRepositoryContentLayout.class );
 
-            VersionedReference ref = new VersionedReference();
-            ref.setArtifactId( projectId );
-            ref.setGroupId( namespace );
-            ref.setVersion( version );
-
-            repository.deleteVersion( ref );
-
-            /*
-            ProjectReference projectReference = new ProjectReference();
-            projectReference.setGroupId( namespace );
-            projectReference.setArtifactId( projectId );
-
-            repository.getVersions(  )
-            */
-
-            ArtifactReference artifactReference = new ArtifactReference();
-            artifactReference.setGroupId( namespace );
-            artifactReference.setArtifactId( projectId );
-            artifactReference.setVersion( version );
+            ArchivaItemSelector selector = ArchivaItemSelector.builder( )
+                .withNamespace( namespace )
+                .withProjectId( projectId )
+                .withVersion( version )
+                .build( );
+            Version versionItem = layout.getVersion( selector );
+            if (versionItem!=null && versionItem.exists()) {
+                repository.deleteItem( versionItem );
+            }
 
             MetadataRepository metadataRepository = repositorySession.getRepository();
-
-            Set<ArtifactReference> related = repository.getRelatedArtifacts( artifactReference );
-            log.debug( "related: {}", related );
-            for ( ArtifactReference artifactRef : related )
-            {
-                repository.deleteArtifact( artifactRef );
-            }
 
             Collection<ArtifactMetadata> artifacts =
                 metadataRepository.getArtifacts(repositorySession , repositoryId, namespace, projectId, version );
@@ -708,15 +690,7 @@ public class DefaultRepositoriesService
 
             metadataRepository.removeProjectVersion(repositorySession , repositoryId, namespace, projectId, version );
         }
-        catch ( MetadataRepositoryException e )
-        {
-            throw new ArchivaRestServiceException( "Repository exception: " + e.getMessage(), 500, e );
-        }
-        catch ( MetadataResolutionException e )
-        {
-            throw new ArchivaRestServiceException( "Repository exception: " + e.getMessage(), 500, e );
-        }
-        catch ( RepositoryException e )
+        catch ( MetadataRepositoryException | MetadataResolutionException | RepositoryException | ItemNotFoundException | LayoutException e )
         {
             throw new ArchivaRestServiceException( "Repository exception: " + e.getMessage(), 500, e );
         }
@@ -731,6 +705,7 @@ public class DefaultRepositoriesService
 
             repositorySession.close();
         }
+
 
         return Boolean.TRUE;
     }
@@ -776,6 +751,7 @@ public class DefaultRepositoriesService
 
         boolean snapshotVersion =
             VersionUtil.isSnapshot( artifact.getVersion() ) | VersionUtil.isGenericSnapshot( artifact.getVersion() );
+        String baseVersion = VersionUtil.getBaseVersion( artifact.getVersion( ) );
 
         RepositorySession repositorySession = null;
         try
@@ -795,23 +771,27 @@ public class DefaultRepositoriesService
             fmt.setTimeZone( timezone );
             ManagedRepository repo = repositoryRegistry.getManagedRepository( repositoryId );
 
-            VersionedReference ref = new VersionedReference();
-            ref.setArtifactId( artifact.getArtifactId() );
-            ref.setGroupId( artifact.getGroupId() );
-            ref.setVersion( artifact.getVersion() );
-
             ManagedRepositoryContent repository = getManagedRepositoryContent( repositoryId );
+            BaseRepositoryContentLayout layout = repository.getLayout( BaseRepositoryContentLayout.class );
 
-            ArtifactReference artifactReference = new ArtifactReference();
-            artifactReference.setArtifactId( artifact.getArtifactId() );
-            artifactReference.setGroupId( artifact.getGroupId() );
-            artifactReference.setVersion( artifact.getVersion() );
-            artifactReference.setClassifier( artifact.getClassifier() );
-            artifactReference.setType( artifact.getPackaging() );
+            ArchivaItemSelector versionSelector = ArchivaItemSelector.builder( ).withNamespace( artifact.getGroupId( ) )
+                .withProjectId( artifact.getArtifactId( ) )
+                .withVersion( baseVersion ).build( );
+
+            Version version1 = layout.getVersion( versionSelector );
+            String path = repository.toPath( version1 );
+
+            ArchivaItemSelector selector = ArchivaItemSelector.builder( )
+                .withNamespace( artifact.getGroupId( ) )
+                .withProjectId( artifact.getArtifactId( ) )
+                .withVersion( baseVersion )
+                .withClassifier( artifact.getClassifier( ) )
+                .withArtifactId( artifact.getArtifactId( ) )
+                .withType( artifact.getType( ) )
+                .includeRelatedArtifacts()
+                .build( );
 
             MetadataRepository metadataRepository = repositorySession.getRepository();
-
-            String path = repository.toMetadataPath( ref );
 
             if ( StringUtils.isNotBlank( artifact.getClassifier() ) )
             {
@@ -820,8 +800,17 @@ public class DefaultRepositoriesService
                     throw new ArchivaRestServiceException( "You must configure a type/packaging when using classifier",
                                                            400, null );
                 }
-
-                repository.deleteArtifact( artifactReference );
+                List<? extends org.apache.archiva.repository.content.Artifact> artifactItems = layout.getArtifacts( selector );
+                for ( org.apache.archiva.repository.content.Artifact aRef : artifactItems ) {
+                    try
+                    {
+                        repository.deleteItem( aRef );
+                    }
+                    catch ( ItemNotFoundException e )
+                    {
+                        log.error( "Could not delete item, seems to be deleted by other thread. {}, {} ", aRef, e.getMessage( ) );
+                    }
+                }
 
             }
             else
@@ -841,21 +830,33 @@ public class DefaultRepositoriesService
 
                 // TODO: this should be in the storage mechanism so that it is all tied together
                 // delete from file system
-                if ( !snapshotVersion )
+                if ( !snapshotVersion && version1.exists() )
                 {
-                    repository.deleteVersion( ref );
+                    try
+                    {
+                        repository.deleteItem( version1 );
+                    }
+                    catch ( ItemNotFoundException e )
+                    {
+                        log.error( "Could not delete version item {}", e.getMessage( ) );
+                    }
                 }
                 else
                 {
-                    Set<ArtifactReference> related = repository.getRelatedArtifacts( artifactReference );
-                    log.debug( "related: {}", related );
-                    for ( ArtifactReference artifactRef : related )
-                    {
-                        repository.deleteArtifact( artifactRef );
+                    // We are deleting all version related artifacts for a snapshot version
+                    for ( org.apache.archiva.repository.content.Artifact delArtifact : layout.getArtifacts( selector )) {
+                        try
+                        {
+                            repository.deleteItem( delArtifact );
+                        }
+                        catch ( ItemNotFoundException e )
+                        {
+                            log.warn( "Artifact that should be deleted, was not found: {}", delArtifact );
+                        }
+
                     }
                     StorageAsset metadataFile = getMetadata( repo, targetPath.getPath() );
-                    ArchivaRepositoryMetadata metadata = getMetadata( metadataFile );
-
+                    ArchivaRepositoryMetadata metadata = getMetadata( repository.getRepository().getType(), metadataFile );
                     updateMetadata( metadata, metadataFile, lastUpdatedTimestamp, artifact );
                 }
             }
@@ -863,7 +864,6 @@ public class DefaultRepositoriesService
 
             if ( snapshotVersion )
             {
-                String baseVersion = VersionUtil.getBaseVersion( artifact.getVersion() );
                 artifacts =
                     metadataRepository.getArtifacts(repositorySession , repositoryId, artifact.getGroupId(),
                         artifact.getArtifactId(), baseVersion );
@@ -966,11 +966,7 @@ public class DefaultRepositoriesService
         {
             throw new ArchivaRestServiceException( "Repository exception: " + e.getMessage(), 500, e );
         }
-        catch (MetadataResolutionException | MetadataSessionException e )
-        {
-            throw new ArchivaRestServiceException( "Repository exception: " + e.getMessage(), 500, e );
-        }
-        catch ( MetadataRepositoryException e )
+        catch (MetadataResolutionException | MetadataSessionException | MetadataRepositoryException | LayoutException e )
         {
             throw new ArchivaRestServiceException( "Repository exception: " + e.getMessage(), 500, e );
         }
@@ -1020,8 +1016,9 @@ public class DefaultRepositoriesService
         try
         {
             ManagedRepositoryContent repository = getManagedRepositoryContent( repositoryId );
-
-            repository.deleteGroupId( groupId );
+            ArchivaItemSelector itemselector = ArchivaItemSelector.builder( ).withNamespace( groupId ).build();
+            ContentItem item = repository.getItem( itemselector );
+            repository.deleteItem( item );
 
             MetadataRepository metadataRepository = repositorySession.getRepository();
 
@@ -1042,6 +1039,11 @@ public class DefaultRepositoriesService
         catch ( RepositoryException e )
         {
             log.error( e.getMessage(), e );
+            throw new ArchivaRestServiceException( "Repository exception: " + e.getMessage(), 500, e );
+        }
+        catch ( ItemNotFoundException e )
+        {
+            log.error( "Item not found {}", e.getMessage(), e );
             throw new ArchivaRestServiceException( "Repository exception: " + e.getMessage(), 500, e );
         }
         finally
@@ -1089,8 +1091,11 @@ public class DefaultRepositoriesService
         try
         {
             ManagedRepositoryContent repository = getManagedRepositoryContent( repositoryId );
+            ArchivaItemSelector itemSelector = ArchivaItemSelector.builder( ).withNamespace( groupId )
+                .withProjectId( projectId ).build( );
+            ContentItem item = repository.getItem( itemSelector );
 
-            repository.deleteProject( groupId, projectId );
+            repository.deleteItem( item );
         }
         catch ( ContentNotFoundException e )
         {
@@ -1099,6 +1104,11 @@ public class DefaultRepositoriesService
         catch ( RepositoryException e )
         {
             log.error( e.getMessage(), e );
+            throw new ArchivaRestServiceException( "Repository exception: " + e.getMessage(), 500, e );
+        }
+        catch ( ItemNotFoundException e )
+        {
+            log.error( "Item not found {}", e.getMessage(), e );
             throw new ArchivaRestServiceException( "Repository exception: " + e.getMessage(), 500, e );
         }
 
